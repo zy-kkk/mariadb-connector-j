@@ -19,4 +19,7 @@ public final class ConnectionState {
 
   /** flag indicating that transaction isolation has been changed */
   public static final int STATE_TRANSACTION_ISOLATION = 16;
+
+  /** flag indicating that default catalog has been changed */
+  public static final int STATE_CATALOG = 32;
 }

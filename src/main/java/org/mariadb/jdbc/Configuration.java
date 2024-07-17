@@ -14,7 +14,6 @@ import org.mariadb.jdbc.export.SslMode;
 import org.mariadb.jdbc.plugin.Codec;
 import org.mariadb.jdbc.plugin.CredentialPlugin;
 import org.mariadb.jdbc.plugin.credential.CredentialPluginLoader;
-import org.mariadb.jdbc.util.constants.CatalogTerm;
 import org.mariadb.jdbc.util.log.Logger;
 import org.mariadb.jdbc.util.log.Loggers;
 import org.mariadb.jdbc.util.options.OptionAliases;
@@ -55,6 +54,7 @@ public class Configuration {
   // standard options
   private String user = null;
   private String password = null;
+  private String catalog = null;
   private String database = null;
   private List<HostAddress> addresses = null;
   private HaMode haMode = HaMode.NONE;
@@ -69,7 +69,6 @@ public class Configuration {
   private Boolean autocommit = null;
   private boolean useMysqlMetadata = false;
   private boolean nullDatabaseMeansCurrent = false;
-  private CatalogTerm useCatalogTerm = CatalogTerm.UseCatalog;
   private boolean createDatabaseIfNotExist = false;
   private boolean useLocalSessionState = false;
   private boolean returnMultiValuesGeneratedIds = false;
@@ -168,6 +167,7 @@ public class Configuration {
   private Configuration(
       String user,
       String password,
+      String catalog,
       String database,
       List<HostAddress> addresses,
       HaMode haMode,
@@ -179,7 +179,6 @@ public class Configuration {
       Boolean autocommit,
       boolean useMysqlMetadata,
       boolean nullDatabaseMeansCurrent,
-      CatalogTerm useCatalogTerm,
       boolean createDatabaseIfNotExist,
       boolean useLocalSessionState,
       boolean returnMultiValuesGeneratedIds,
@@ -255,6 +254,7 @@ public class Configuration {
       boolean allowPublicKeyRetrieval) {
     this.user = user;
     this.password = password;
+    this.catalog = catalog;
     this.database = database;
     this.addresses = addresses;
     this.haMode = haMode;
@@ -266,7 +266,6 @@ public class Configuration {
     this.autocommit = autocommit;
     this.useMysqlMetadata = useMysqlMetadata;
     this.nullDatabaseMeansCurrent = nullDatabaseMeansCurrent;
-    this.useCatalogTerm = useCatalogTerm;
     this.createDatabaseIfNotExist = createDatabaseIfNotExist;
     this.returnMultiValuesGeneratedIds = returnMultiValuesGeneratedIds;
     this.jdbcCompliantTruncation = jdbcCompliantTruncation;
@@ -344,6 +343,7 @@ public class Configuration {
   }
 
   private Configuration(
+      String catalog,
       String database,
       List<HostAddress> addresses,
       HaMode haMode,
@@ -432,6 +432,7 @@ public class Configuration {
       String initSql,
       Properties nonMappedOptions)
       throws SQLException {
+    this.catalog = catalog;
     this.database = database;
     this.addresses = addresses;
     this.nonMappedOptions = nonMappedOptions;
@@ -497,18 +498,6 @@ public class Configuration {
     if (autocommit != null) this.autocommit = autocommit;
     if (useMysqlMetadata != null) this.useMysqlMetadata = useMysqlMetadata;
     if (nullDatabaseMeansCurrent != null) this.nullDatabaseMeansCurrent = nullDatabaseMeansCurrent;
-    if (useCatalogTerm != null) {
-      if (!"CATALOG".equalsIgnoreCase(useCatalogTerm)
-          && !"SCHEMA".equalsIgnoreCase(useCatalogTerm)) {
-        throw new IllegalArgumentException(
-            "useCatalogTerm can only have CATALOG/SCHEMA value, current set value is "
-                + useCatalogTerm);
-      }
-      this.useCatalogTerm =
-          "CATALOG".equalsIgnoreCase(useCatalogTerm)
-              ? CatalogTerm.UseCatalog
-              : CatalogTerm.UseSchema;
-    }
     if (createDatabaseIfNotExist != null) this.createDatabaseIfNotExist = createDatabaseIfNotExist;
     if (useLocalSessionState != null) this.useLocalSessionState = useLocalSessionState;
     if (returnMultiValuesGeneratedIds != null)
@@ -646,6 +635,7 @@ public class Configuration {
         new Builder()
             .user(this.user)
             .password(this.password)
+            .catalog(this.catalog)
             .database(this.database)
             .addresses(this.addresses == null ? null : this.addresses.toArray(new HostAddress[0]))
             .haMode(this.haMode)
@@ -656,7 +646,6 @@ public class Configuration {
             .autocommit(this.autocommit)
             .useMysqlMetadata(this.useMysqlMetadata)
             .nullDatabaseMeansCurrent(this.nullDatabaseMeansCurrent)
-            .useCatalogTerm(this.useCatalogTerm == CatalogTerm.UseCatalog ? "CATALOG" : "SCHEMA")
             .createDatabaseIfNotExist(this.createDatabaseIfNotExist)
             .useLocalSessionState(this.useLocalSessionState)
             .returnMultiValuesGeneratedIds(this.returnMultiValuesGeneratedIds)
@@ -746,7 +735,8 @@ public class Configuration {
   public static boolean acceptsUrl(String url) {
     return url != null
         && (url.startsWith("jdbc:mariadb:")
-            || (url.startsWith("jdbc:mysql:") && url.contains("permitMysqlScheme")));
+            || (url.startsWith("jdbc:mysql:") && url.contains("permitMysqlScheme"))
+            || url.startsWith("jdbc:doris:"));
   }
 
   /**
@@ -804,47 +794,39 @@ public class Configuration {
       int dbIndex = urlSecondPart.indexOf("/", posToSkip);
       int paramIndex = urlSecondPart.indexOf("?");
 
-      String hostAddressesString;
-      String additionalParameters;
-      if ((dbIndex < paramIndex && dbIndex < 0) || (dbIndex > paramIndex && paramIndex > -1)) {
-        hostAddressesString = urlSecondPart.substring(0, paramIndex);
-        additionalParameters = urlSecondPart.substring(paramIndex);
-      } else if (dbIndex < paramIndex || dbIndex > paramIndex) {
-        hostAddressesString = urlSecondPart.substring(0, dbIndex);
-        additionalParameters = urlSecondPart.substring(dbIndex);
-      } else {
-        hostAddressesString = urlSecondPart;
-        additionalParameters = null;
+      // 初始化 catalog 和 database 的索引位置
+      int catalogStartIndex = dbIndex + 1;
+      int catalogEndIndex = (paramIndex > -1) ? paramIndex : urlSecondPart.length(); // 如果有参数，catalogEndIndex是参数的开始，否则是URL的结束
+
+      // 如果存在数据库路径
+      if (dbIndex > -1) {
+        catalogEndIndex = urlSecondPart.indexOf("/", catalogStartIndex);
+        if (catalogEndIndex == -1) { // 未找到第二个 '/', 即没有 database
+          catalogEndIndex = (paramIndex > -1) ? paramIndex : urlSecondPart.length();
+          builder.catalog(urlSecondPart.substring(catalogStartIndex, catalogEndIndex));
+        } else {
+          builder.catalog(urlSecondPart.substring(catalogStartIndex, catalogEndIndex));
+          int databaseStartIndex = catalogEndIndex + 1;
+          int databaseEndIndex = (paramIndex > -1) ? paramIndex : urlSecondPart.length();
+          builder.database(urlSecondPart.substring(databaseStartIndex, databaseEndIndex));
+        }
       }
 
-      if (additionalParameters != null) {
-        int optIndex = additionalParameters.indexOf("?");
-        String database;
-        if (optIndex < 0) {
-          database = (additionalParameters.length() > 1) ? additionalParameters.substring(1) : null;
-        } else {
-          if (optIndex == 0) {
-            database = null;
+      // 处理主机和端口字符串
+      String hostAddressesString = (dbIndex > -1) ? urlSecondPart.substring(0, dbIndex) : urlSecondPart.substring(0, paramIndex);
+
+      // 处理附加参数
+      if (paramIndex != -1) {
+        String urlParameters = urlSecondPart.substring(paramIndex + 1);
+        String[] parameters = urlParameters.split("&");
+        for (String parameter : parameters) {
+          int pos = parameter.indexOf('=');
+          if (pos == -1) {
+            properties.setProperty(parameter, "");
           } else {
-            database = additionalParameters.substring(1, optIndex);
-            if (database.isEmpty()) database = null;
-          }
-          String urlParameters = additionalParameters.substring(optIndex + 1);
-          if (!urlParameters.isEmpty()) {
-            String[] parameters = urlParameters.split("&");
-            for (String parameter : parameters) {
-              int pos = parameter.indexOf('=');
-              if (pos == -1) {
-                properties.setProperty(parameter, "");
-              } else {
-                properties.setProperty(parameter.substring(0, pos), parameter.substring(pos + 1));
-              }
-            }
+            properties.setProperty(parameter.substring(0, pos), parameter.substring(pos + 1));
           }
         }
-        builder.database(database);
-      } else {
-        builder.database(null);
       }
 
       mapPropertiesToOption(builder, properties);
@@ -1100,7 +1082,7 @@ public class Configuration {
   protected static String buildUrl(Configuration conf) {
     Configuration defaultConf = new Configuration();
     StringBuilder sb = new StringBuilder();
-    sb.append("jdbc:mariadb:");
+    sb.append("jdbc:doris:");
     if (conf.haMode != HaMode.NONE) {
       sb.append(conf.haMode.toString().toLowerCase(Locale.ROOT)).append(":");
     }
@@ -1118,6 +1100,11 @@ public class Configuration {
       } else {
         sb.append(hostAddress);
       }
+    }
+
+    sb.append("/");
+    if (conf.catalog != null) {
+      sb.append(conf.catalog);
     }
 
     sb.append("/");
@@ -1193,13 +1180,6 @@ public class Configuration {
               sb.append(key).append('=');
               sb.append(properties.get(key));
             }
-          } else if (field.getType().equals(CatalogTerm.class)) {
-            Object defaultValue = field.get(defaultConf);
-            if (!obj.equals(defaultValue)) {
-              sb.append(first ? '?' : '&');
-              first = false;
-              sb.append(field.getName()).append("=SCHEMA");
-            }
           } else if (field.getType().equals(CredentialPlugin.class)) {
             Object defaultValue = field.get(defaultConf);
             if (!obj.equals(defaultValue)) {
@@ -1251,6 +1231,15 @@ public class Configuration {
       // not possible
     }
     return null;
+  }
+
+  /**
+   * COnnection default catalog
+   *
+   * @return catalog
+   */
+  public String catalog() {
+    return catalog;
   }
 
   /**
@@ -1755,15 +1744,6 @@ public class Configuration {
   }
 
   /**
-   * Indicating using Catalog or Schema
-   *
-   * @return Indicating using Catalog or Schema
-   */
-  public CatalogTerm useCatalogTerm() {
-    return useCatalogTerm;
-  }
-
-  /**
    * create database if not exist
    *
    * @return create database if not exist
@@ -2120,6 +2100,7 @@ public class Configuration {
     private String user;
     private String password;
     private String database;
+    private String catalog;
 
     // various
     private String timezone;
@@ -2341,6 +2322,17 @@ public class Configuration {
      */
     public Builder fallbackToSystemTrustStore(Boolean fallbackToSystemTrustStore) {
       this.fallbackToSystemTrustStore = fallbackToSystemTrustStore;
+      return this;
+    }
+
+    /**
+     * Set default catalog
+     *
+     * @param catalog catalog
+     * @return this {@link Builder}
+     */
+    public Builder catalog(String catalog) {
+      this.catalog = catalog;
       return this;
     }
 
@@ -3311,6 +3303,7 @@ public class Configuration {
     public Configuration build() throws SQLException {
       Configuration conf =
           new Configuration(
+              this.catalog,
               this.database,
               this._addresses,
               this._haMode,

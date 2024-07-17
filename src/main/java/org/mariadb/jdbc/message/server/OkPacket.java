@@ -107,6 +107,15 @@ public class OkPacket implements Completion {
                 logger.debug("Database change: is '{}'", database);
                 break;
 
+              case StateChange.SESSION_TRACK_CATALOG:
+                sessionStateBuf.readIntLengthEncodedNotNull();
+                Integer catLen = sessionStateBuf.readLength();
+                String catalog =
+                    catLen == null || catLen == 0 ? null : sessionStateBuf.readString(catLen);
+                context.setCatalog(catalog);
+                logger.debug("Catalog change: is '{}'", catalog);
+                break;
+
               default:
                 buf.skip(buf.readIntLengthEncodedNotNull());
                 break;
@@ -199,6 +208,15 @@ public class OkPacket implements Completion {
                     dbLen == null || dbLen == 0 ? null : sessionStateBuf.readString(dbLen);
                 context.setDatabase(database);
                 logger.debug("Database change: is '{}'", database);
+                break;
+
+              case StateChange.SESSION_TRACK_CATALOG:
+                sessionStateBuf.readIntLengthEncodedNotNull();
+                Integer catLen = sessionStateBuf.readLength();
+                String catalog =
+                    catLen == null || catLen == 0 ? null : sessionStateBuf.readString(catLen);
+                context.setCatalog(catalog);
+                logger.debug("Catalog change: is '{}'", catalog);
                 break;
 
               default:

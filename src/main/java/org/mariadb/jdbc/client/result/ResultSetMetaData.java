@@ -9,7 +9,6 @@ import org.mariadb.jdbc.Configuration;
 import org.mariadb.jdbc.client.Column;
 import org.mariadb.jdbc.client.ColumnDecoder;
 import org.mariadb.jdbc.export.ExceptionFactory;
-import org.mariadb.jdbc.util.constants.CatalogTerm;
 import org.mariadb.jdbc.util.constants.ColumnFlags;
 
 /** Result-set metadata */
@@ -165,8 +164,7 @@ public class ResultSetMetaData implements java.sql.ResultSetMetaData {
    * @throws SQLException if a database access error occurs
    */
   public String getCatalogName(int column) throws SQLException {
-    if (conf.useCatalogTerm() == CatalogTerm.UseSchema) return getColumn(column).getCatalog();
-    return getColumn(column).getSchema();
+    return getColumn(column).getCatalog();
   }
 
   /**
@@ -217,8 +215,7 @@ public class ResultSetMetaData implements java.sql.ResultSetMetaData {
   }
 
   public String getSchemaName(int column) throws SQLException {
-    if (conf.useCatalogTerm() == CatalogTerm.UseSchema) return getColumn(column).getSchema();
-    return "";
+    return getColumn(column).getSchema();
   }
 
   /**

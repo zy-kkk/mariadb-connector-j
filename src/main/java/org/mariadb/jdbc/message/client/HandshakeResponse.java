@@ -35,6 +35,7 @@ public final class HandshakeResponse implements ClientMessage {
 
   private final String username;
   private final CharSequence password;
+  private final String catalog;
   private final String database;
   private final String connectionAttributes;
   private final String host;
@@ -66,6 +67,7 @@ public final class HandshakeResponse implements ClientMessage {
     this.seed = seed;
     this.username = credential.getUser();
     this.password = credential.getPassword();
+    this.catalog = conf.catalog();
     this.database = conf.database();
     this.connectionAttributes = conf.connectionAttributes();
     this.host = host;

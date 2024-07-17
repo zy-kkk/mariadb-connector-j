@@ -44,6 +44,9 @@ public class BaseContext implements Context {
   private long threadId;
   private String charset;
 
+  /** Server current catalog */
+  private String catalog;
+
   /** Server current database */
   private String database;
 
@@ -92,6 +95,7 @@ public class BaseContext implements Context {
             ? ColumnDecoder::decode
             : ColumnDecoder::decodeStd;
     this.conf = conf;
+    this.catalog = conf.catalog();
     this.database = conf.database();
     this.exceptionFactory = exceptionFactory;
     this.prepareCache = prepareCache;
@@ -134,6 +138,14 @@ public class BaseContext implements Context {
 
   public void setServerStatus(int serverStatus) {
     this.serverStatus = serverStatus;
+  }
+
+  public String getCatalog() {
+    return catalog;
+  }
+
+  public void setCatalog(String catalog) {
+    this.catalog = catalog;
   }
 
   public String getDatabase() {
@@ -185,12 +197,12 @@ public class BaseContext implements Context {
   }
 
   public Prepare getPrepareCacheCmd(String sql, BasePreparedStatement preparedStatement) {
-    return prepareCache.get(database + "|" + sql, preparedStatement);
+    return prepareCache.get(catalog + "|" + database + "|" + sql, preparedStatement);
   }
 
   public Prepare putPrepareCacheCmd(
       String sql, Prepare result, BasePreparedStatement preparedStatement) {
-    return prepareCache.put(database + "|" + sql, result, preparedStatement);
+    return prepareCache.put(catalog + "|" + database + "|" + sql, result, preparedStatement);
   }
 
   public void resetPrepareCache() {

@@ -23,4 +23,7 @@ public final class StateChange {
 
   /** transaction state change */
   public static final short SESSION_TRACK_TRANSACTION_STATE = 5;
+
+  /** catalog change */
+  public static final short SESSION_TRACK_CATALOG = 6;
 }

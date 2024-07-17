@@ -3,6 +3,9 @@
 // Copyright (c) 2015-2024 MariaDB Corporation Ab
 package org.mariadb.jdbc;
 
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.sql.*;
 import java.sql.Statement;
 import java.text.ParseException;
@@ -11,7 +14,6 @@ import org.mariadb.jdbc.client.DataType;
 import org.mariadb.jdbc.client.ServerVersion;
 import org.mariadb.jdbc.client.result.CompleteResult;
 import org.mariadb.jdbc.util.VersionFactory;
-import org.mariadb.jdbc.util.constants.CatalogTerm;
 import org.mariadb.jdbc.util.constants.ColumnFlags;
 import org.mariadb.jdbc.util.constants.ServerStatus;
 
@@ -189,6 +191,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
 
   private void parseShowCreateTable(
       String tableDef,
+      String catalog,
       String database,
       String tableName,
       boolean importedKeysWithConstraintNames,
@@ -232,18 +235,12 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
       for (int i = 0; i < primaryKeyCols.size(); i++) {
 
         String[] row = new String[14];
-        row[0] =
-            conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                ? (pkTable.schema == null ? database : pkTable.schema)
-                : "def"; // PKTABLE_CAT
-        row[1] =
-            conf.useCatalogTerm() == CatalogTerm.UseSchema
-                ? (pkTable.schema == null ? database : pkTable.schema)
-                : null; // PKTABLE_SCHEM
+        row[0] = pkTable.catalog; // PKTABLE_CAT
+        row[1] = pkTable.schema; // PKTABLE_SCHEM
         row[2] = pkTable.name; // PKTABLE_NAME
         row[3] = primaryKeyCols.get(i).name; // PKCOLUMN_NAME
-        row[4] = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? database : "def"; // FKTABLE_CAT
-        row[5] = conf.useCatalogTerm() == CatalogTerm.UseSchema ? database : null; // FKTABLE_SCHEM
+        row[4] = catalog; // FKTABLE_CAT
+        row[5] = database; // FKTABLE_SCHEM
         row[6] = tableName; // FKTABLE_NAME
         row[7] = foreignKeyCols.get(i).name; // FKCOLUMN_NAME
         row[8] = Integer.toString(i + 1); // KEY_SEQ
@@ -405,20 +402,19 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
     if (table == null || table.isEmpty()) {
       throw new SQLException("'table' parameter in getImportedKeys cannot be null");
     }
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schema;
     boolean getImportedKeysUsingIs =
         Boolean.parseBoolean(
             conf.nonMappedOptions().getProperty("getImportedKeysUsingIs", "false"));
 
-    if (getImportedKeysUsingIs) return getImportedKeysUsingInformationSchema(database, table);
+    if (getImportedKeysUsingIs) return getImportedKeysUsingInformationSchema(catalog, schema, table);
 
     try {
-      return getImportedKeysUsingShowCreateTable(database, table);
+      return getImportedKeysUsingShowCreateTable(catalog, schema, table);
     } catch (Exception e) {
       // since 3.4.1 show create is now used by default, and there is no reason to have parsing
       // exception, but cannot remove that try-catch in a correction release.
       // TODO to be removed next minor version
-      return getImportedKeysUsingInformationSchema(database, table);
+      return getImportedKeysUsingInformationSchema(catalog, schema, table);
     }
   }
 
@@ -624,15 +620,12 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
     }
     StringBuilder sb =
         new StringBuilder("SELECT ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "TABLE_SCHEMA TABLE_CAT, NULL TABLE_SCHEM"
-                    : "TABLE_CATALOG TABLE_CAT, TABLE_SCHEMA TABLE_SCHEM")
+            .append("TABLE_CATALOG TABLE_CAT, TABLE_SCHEMA TABLE_SCHEM")
             .append(
                 ", TABLE_NAME, COLUMN_NAME, SEQ_IN_INDEX KEY_SEQ, INDEX_NAME PK_NAME "
                     + " FROM INFORMATION_SCHEMA.STATISTICS"
                     + " WHERE INDEX_NAME='PRIMARY'");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schema;
+    String database = catalog + "." + schema;
     databaseCond(false, sb, "TABLE_SCHEMA", database, false);
     sb.append(" AND TABLE_NAME = ").append(escapeQuote(table)).append(" ORDER BY COLUMN_NAME");
 
@@ -684,9 +677,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
     StringBuilder sb =
         new StringBuilder(
             "SELECT "
-                + (conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "TABLE_SCHEMA TABLE_CAT, NULL TABLE_SCHEM,"
-                    : "TABLE_CATALOG TABLE_CAT, TABLE_SCHEMA TABLE_SCHEM,")
+                + "TABLE_CATALOG TABLE_CAT, TABLE_SCHEMA TABLE_SCHEM,"
                 + " TABLE_NAME,   IF(TABLE_SCHEMA IN ('mysql', 'performance_schema', 'sys'),"
                 + " IF(TABLE_TYPE='BASE TABLE', 'SYSTEM TABLE', IF(TABLE_TYPE='VIEW', 'SYSTEM"
                 + " VIEW', TABLE_TYPE)), IF(TABLE_TYPE='BASE TABLE' or TABLE_TYPE='SYSTEM"
@@ -694,10 +685,10 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                 + " TABLE_TYPE))) as TABLE_TYPE,  TABLE_COMMENT REMARKS, NULL TYPE_CAT, NULL"
                 + " TYPE_SCHEM, NULL TYPE_NAME, NULL SELF_REFERENCING_COL_NAME,  NULL"
                 + " REF_GENERATION FROM INFORMATION_SCHEMA.TABLES");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schemaPattern;
+    String database = catalog + "." + schemaPattern;
     boolean firstCondition =
         databaseCond(
-            true, sb, "TABLE_SCHEMA", database, conf.useCatalogTerm() == CatalogTerm.UseSchema);
+            true, sb, "TABLE_SCHEMA", database, true);
     firstCondition = patternCond(firstCondition, sb, "TABLE_NAME", tableNamePattern);
 
     if (types != null && types.length > 0) {
@@ -837,10 +828,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
             : version.versionGreaterOrEqual(5, 6, 4);
     StringBuilder sb = new StringBuilder();
     sb.append("SELECT ")
-        .append(
-            conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                ? "TABLE_SCHEMA TABLE_CAT, NULL TABLE_SCHEM"
-                : "TABLE_CATALOG TABLE_CAT, TABLE_SCHEMA TABLE_SCHEM")
+        .append("TABLE_CATALOG TABLE_CAT, TABLE_SCHEMA TABLE_SCHEM")
         .append(", TABLE_NAME, COLUMN_NAME,")
         .append(dataTypeClause("COLUMN_TYPE"))
         .append(" DATA_TYPE,")
@@ -882,10 +870,10 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                 + " 'auto_increment','YES','NO') IS_AUTOINCREMENT,  IF(EXTRA in ('VIRTUAL',"
                 + " 'PERSISTENT', 'VIRTUAL GENERATED', 'STORED GENERATED') ,'YES','NO')"
                 + " IS_GENERATEDCOLUMN  FROM INFORMATION_SCHEMA.COLUMNS");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schemaPattern;
+    String database = catalog + "." + schemaPattern;
     boolean firstCondition =
         databaseCond(
-            true, sb, "TABLE_SCHEMA", database, conf.useCatalogTerm() == CatalogTerm.UseSchema);
+            true, sb, "TABLE_SCHEMA", database, true);
     firstCondition = patternCond(firstCondition, sb, "TABLE_NAME", tableNamePattern);
     patternCond(firstCondition, sb, "COLUMN_NAME", columnNamePattern);
     sb.append(" ORDER BY TABLE_CAT, TABLE_SCHEM, TABLE_NAME, ORDINAL_POSITION");
@@ -998,7 +986,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
       DataType.VARCHAR, DataType.SMALLINT
     };
 
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schema;
+    String database = catalog + "." + schema;
 
     List<String[]> data = new ArrayList<>();
     Statement stmt = connection.createStatement();
@@ -1067,20 +1055,12 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
 
             for (int i = 0; i < primaryKeyCols.size(); i++) {
               String[] row = new String[14];
-              row[0] =
-                  conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                      ? (pkTable.schema == null ? database : pkTable.schema)
-                      : "def"; // PKTABLE_CAT
-              row[1] =
-                  conf.useCatalogTerm() == CatalogTerm.UseSchema
-                      ? (pkTable.schema == null ? database : pkTable.schema)
-                      : null; // PKTABLE_SCHEM
+              row[0] = pkTable.catalog; // PKTABLE_CAT
+              row[1] = pkTable.schema; // PKTABLE_SCHEM
               row[2] = pkTable.name; // PKTABLE_NAME
               row[3] = primaryKeyCols.get(i).name; // PKCOLUMN_NAME
-              row[4] =
-                  conf.useCatalogTerm() == CatalogTerm.UseCatalog ? database : "def"; // FKTABLE_CAT
-              row[5] =
-                  conf.useCatalogTerm() == CatalogTerm.UseSchema ? database : null; // FKTABLE_SCHEM
+              row[4] = catalog; // FKTABLE_CAT
+              row[5] = database; // FKTABLE_SCHEM
               row[6] = tableName; // FKTABLE_NAME
               row[7] = foreignKeyCols.get(i).name; // FKCOLUMN_NAME
               row[8] = Integer.toString(i + 1); // KEY_SEQ
@@ -1163,18 +1143,12 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
       String catalog, String schema, String table) throws SQLException {
     StringBuilder sb =
         new StringBuilder("SELECT ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "KCU.REFERENCED_TABLE_SCHEMA PKTABLE_CAT, NULL PKTABLE_SCHEM"
-                    : "KCU.CONSTRAINT_CATALOG PKTABLE_CAT, KCU.REFERENCED_TABLE_SCHEMA"
+            .append("KCU.CONSTRAINT_CATALOG PKTABLE_CAT, KCU.REFERENCED_TABLE_SCHEMA"
                         + " PKTABLE_SCHEM")
             .append(
                 ",  KCU.REFERENCED_TABLE_NAME PKTABLE_NAME,"
                     + " KCU.REFERENCED_COLUMN_NAME PKCOLUMN_NAME, ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "KCU.TABLE_SCHEMA FKTABLE_CAT, NULL FKTABLE_SCHEM"
-                    : " TABLE_CATALOG FKTABLE_CAT, KCU.TABLE_SCHEMA FKTABLE_SCHEM")
+            .append(" TABLE_CATALOG FKTABLE_CAT, KCU.TABLE_SCHEMA FKTABLE_SCHEM")
             .append(
                 ", KCU.TABLE_NAME FKTABLE_NAME, KCU.COLUMN_NAME FKCOLUMN_NAME,"
                     + " KCU.POSITION_IN_UNIQUE_CONSTRAINT KEY_SEQ, CASE update_rule    WHEN"
@@ -1190,14 +1164,14 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                     + " ON KCU.CONSTRAINT_CATALOG = RC.CONSTRAINT_CATALOG"
                     + " AND KCU.CONSTRAINT_SCHEMA = RC.CONSTRAINT_SCHEMA"
                     + " AND KCU.CONSTRAINT_NAME = RC.CONSTRAINT_NAME");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schema;
+    String database = catalog + "." + schema;
     boolean firstCondition =
         databaseCond(
             true,
             sb,
             "KCU.REFERENCED_TABLE_SCHEMA",
             database,
-            conf.useCatalogTerm() == CatalogTerm.UseSchema);
+            true);
     sb.append(firstCondition ? " WHERE " : " AND ")
         .append("KCU.REFERENCED_TABLE_NAME = ")
         .append(escapeQuote(table));
@@ -1213,21 +1187,15 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
    * @return resultset
    * @throws SQLException exception
    */
-  public ResultSet getImportedKeysUsingInformationSchema(final String database, String table)
+  public ResultSet getImportedKeysUsingInformationSchema(final String catalog, final String database, String table)
       throws SQLException {
     StringBuilder sb =
         new StringBuilder("SELECT ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "KCU.REFERENCED_TABLE_SCHEMA PKTABLE_CAT, NULL PKTABLE_SCHEM"
-                    : "KCU.TABLE_CATALOG PKTABLE_CAT, KCU.REFERENCED_TABLE_SCHEMA PKTABLE_SCHEM")
+            .append("KCU.TABLE_CATALOG PKTABLE_CAT, KCU.REFERENCED_TABLE_SCHEMA PKTABLE_SCHEM")
             .append(
                 ",  KCU.REFERENCED_TABLE_NAME PKTABLE_NAME,"
                     + " KCU.REFERENCED_COLUMN_NAME PKCOLUMN_NAME, ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "KCU.TABLE_SCHEMA FKTABLE_CAT, NULL FKTABLE_SCHEM"
-                    : "KCU.TABLE_CATALOG FKTABLE_CAT, KCU.TABLE_SCHEMA FKTABLE_SCHEM")
+            .append("KCU.TABLE_CATALOG FKTABLE_CAT, KCU.TABLE_SCHEMA FKTABLE_SCHEM")
             .append(
                 ", KCU.TABLE_NAME FKTABLE_NAME, KCU.COLUMN_NAME FKCOLUMN_NAME,"
                     + " KCU.POSITION_IN_UNIQUE_CONSTRAINT KEY_SEQ, CASE update_rule    WHEN"
@@ -1262,7 +1230,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
    * @return resultset
    * @throws Exception exception
    */
-  public ResultSet getImportedKeysUsingShowCreateTable(final String database, String table)
+  public ResultSet getImportedKeysUsingShowCreateTable(final String catalog, final String database, String table)
       throws Exception {
 
     boolean importedKeysWithConstraintNames =
@@ -1292,7 +1260,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
               "SHOW CREATE TABLE " + quoteIdentifier(database) + "." + quoteIdentifier(table));
       rs.next();
       String tableDef = rs.getString(2);
-      parseShowCreateTable(tableDef, database, table, importedKeysWithConstraintNames, data);
+      parseShowCreateTable(tableDef, catalog, database, table, importedKeysWithConstraintNames, data);
 
     } else {
       List<String> databases = new ArrayList<>();
@@ -1310,7 +1278,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                   "SHOW CREATE TABLE " + quoteIdentifier(db) + "." + quoteIdentifier(table));
           rs.next();
           String tableDef = rs.getString(2);
-          parseShowCreateTable(tableDef, db, table, importedKeysWithConstraintNames, data);
+          parseShowCreateTable(tableDef, catalog, db, table, importedKeysWithConstraintNames, data);
         } catch (SQLException e) {
           // eat
         }
@@ -1411,7 +1379,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
 
     StringBuilder sbInner =
         new StringBuilder("SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE COLUMN_KEY = 'PRI'");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schema;
+    String database = catalog + "." + schema;
     databaseCond(false, sbInner, "TABLE_SCHEMA", database, false);
     sbInner.append(" AND TABLE_NAME = ").append(escapeQuote(table));
 
@@ -2271,10 +2239,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
 
     StringBuilder sb =
         new StringBuilder("SELECT ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "ROUTINE_SCHEMA PROCEDURE_CAT, NULL PROCEDURE_SCHEM"
-                    : "ROUTINE_CATALOG PROCEDURE_CAT, ROUTINE_SCHEMA PROCEDURE_SCHEM")
+            .append("ROUTINE_CATALOG PROCEDURE_CAT, ROUTINE_SCHEMA PROCEDURE_SCHEM")
             .append(
                 ", ROUTINE_NAME PROCEDURE_NAME,"
                     + " NULL RESERVED1,"
@@ -2291,10 +2256,10 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                     + " END PROCEDURE_TYPE,"
                     + " SPECIFIC_NAME "
                     + " FROM INFORMATION_SCHEMA.ROUTINES ");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schemaPattern;
+    String database = catalog + "." + schemaPattern;
     boolean firstCondition =
         databaseCond(
-            true, sb, "ROUTINE_SCHEMA", database, conf.useCatalogTerm() == CatalogTerm.UseSchema);
+            true, sb, "ROUTINE_SCHEMA", database, true);
     patternCond(firstCondition, sb, "ROUTINE_NAME", procedureNamePattern);
 
     return executeQuery(sb.toString());
@@ -2455,10 +2420,10 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                 + " NULLABLE,NULL REMARKS,NULL COLUMN_DEF,0 SQL_DATA_TYPE,0"
                 + " SQL_DATETIME_SUB,CHARACTER_OCTET_LENGTH CHAR_OCTET_LENGTH ,ORDINAL_POSITION, ''"
                 + " IS_NULLABLE, SPECIFIC_NAME  FROM INFORMATION_SCHEMA.PARAMETERS");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schemaPattern;
+    String database = catalog + "." + schemaPattern;
     boolean firstCondition =
         databaseCond(
-            true, sb, "SPECIFIC_SCHEMA", database, conf.useCatalogTerm() == CatalogTerm.UseCatalog);
+            true, sb, "SPECIFIC_SCHEMA", database, true);
     firstCondition = patternCond(firstCondition, sb, "SPECIFIC_NAME", procedureNamePattern);
     patternCond(firstCondition, sb, "PARAMETER_NAME", columnNamePattern);
     sb.append(" ORDER BY SPECIFIC_SCHEMA, SPECIFIC_NAME, ORDINAL_POSITION");
@@ -2557,10 +2522,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
 
     StringBuilder sb =
         new StringBuilder("SELECT ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "SPECIFIC_SCHEMA `FUNCTION_CAT`, NULL `FUNCTION_SCHEM`"
-                    : "SPECIFIC_CATALOG `FUNCTION_CAT`, SPECIFIC_SCHEMA `FUNCTION_SCHEM`")
+            .append("SPECIFIC_CATALOG `FUNCTION_CAT`, SPECIFIC_SCHEMA `FUNCTION_SCHEM`")
             .append(
                 ", SPECIFIC_NAME FUNCTION_NAME,"
                     + " PARAMETER_NAME COLUMN_NAME, "
@@ -2582,10 +2544,10 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                     + " NULLABLE,NULL REMARKS,CHARACTER_OCTET_LENGTH CHAR_OCTET_LENGTH"
                     + " ,ORDINAL_POSITION, '' IS_NULLABLE, SPECIFIC_NAME  FROM"
                     + " INFORMATION_SCHEMA.PARAMETERS");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schemaPattern;
+    String database = catalog + "." + schemaPattern;
     boolean firstCondition =
         databaseCond(
-            true, sb, "SPECIFIC_SCHEMA", database, conf.useCatalogTerm() == CatalogTerm.UseSchema);
+            true, sb, "SPECIFIC_SCHEMA", database, true);
     firstCondition = patternCond(firstCondition, sb, "SPECIFIC_NAME", functionNamePattern);
     firstCondition = patternCond(firstCondition, sb, "PARAMETER_NAME", columnNamePattern);
     sb.append(firstCondition ? " WHERE " : " AND ")
@@ -2595,33 +2557,48 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
   }
 
   public ResultSet getSchemas() throws SQLException {
-    if (conf.useCatalogTerm() == CatalogTerm.UseSchema) {
-      return executeQuery(
+    return executeQuery(
           "SELECT SCHEMA_NAME as TABLE_SCHEM, CATALOG_NAME as TABLE_CATALOG FROM"
               + " information_schema.SCHEMATA ORDER BY SCHEMA_NAME");
-    }
-    return executeQuery("SELECT '' TABLE_SCHEM, '' TABLE_CATALOG  FROM DUAL WHERE 1=0");
+
   }
 
   public ResultSet getSchemas(String catalog, String schemaPattern) throws SQLException {
-    if (conf.useCatalogTerm() == CatalogTerm.UseSchema) {
-      StringBuilder sb =
+    StringBuilder sb =
           new StringBuilder(
               "SELECT SCHEMA_NAME as TABLE_SCHEM, CATALOG_NAME as TABLE_CATALOG FROM"
                   + " information_schema.SCHEMATA ");
       databaseCond(true, sb, "SCHEMA_NAME", schemaPattern, true);
       sb.append(" ORDER BY SCHEMA_NAME");
       return executeQuery(sb.toString());
-    }
-    return executeQuery("SELECT  '' table_schem, '' table_catalog FROM DUAL WHERE 1=0");
   }
 
   public ResultSet getCatalogs() throws SQLException {
-    if (conf.useCatalogTerm() == CatalogTerm.UseSchema) {
-      return executeQuery("SELECT null TABLE_CAT FROM DUAL WHERE 1=0");
-    }
-    return executeQuery(
-        "SELECT SCHEMA_NAME TABLE_CAT FROM INFORMATION_SCHEMA.SCHEMATA  ORDER BY SCHEMA_NAME");
+    return renameColumn(executeQuery("SHOW CATALOGS"), "CatalogName", "TABLE_CAT");
+  }
+
+  public static ResultSet renameColumn(ResultSet rs, String originalName, String newName) {
+    return (ResultSet) Proxy.newProxyInstance(
+            ResultSet.class.getClassLoader(),
+            new Class<?>[]{ResultSet.class},
+            new InvocationHandler() {
+              @Override
+              public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                // Intercept getColumnName and getColumnLabel method calls
+                if ((method.getName().equals("getColumnName") || method.getName().equals("getColumnLabel"))
+                        && args.length == 1 && method.getParameterTypes()[0] == int.class) {
+                  ResultSetMetaData metaData = rs.getMetaData();
+                  int columnIndex = (Integer) args[0];
+                  String columnName = metaData.getColumnName(columnIndex);
+                  if (columnName.equals(originalName)) {
+                    return newName;
+                  }
+                }
+                // Forward all other method calls to the original ResultSet
+                return method.invoke(rs, args);
+              }
+            }
+    );
   }
 
   public ResultSet getTableTypes() throws SQLException {
@@ -2684,7 +2661,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                 + "PRIVILEGE_TYPE AS PRIVILEGE, "
                 + "IS_GRANTABLE "
                 + "FROM INFORMATION_SCHEMA.COLUMN_PRIVILEGES");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schema;
+    String database = catalog + "." + schema;
     boolean firstCondition = databaseCond(true, sb, "TABLE_SCHEMA", database, false);
     sb.append(firstCondition ? " WHERE " : " AND ")
         .append(" TABLE_NAME = ")
@@ -2743,10 +2720,10 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                 + "PRIVILEGE_TYPE PRIVILEGE, "
                 + "IS_GRANTABLE "
                 + "FROM INFORMATION_SCHEMA.TABLE_PRIVILEGES");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schemaPattern;
+    String database = catalog + "." + schemaPattern;
     boolean firstCondition =
         databaseCond(
-            true, sb, "TABLE_SCHEMA", database, conf.useCatalogTerm() == CatalogTerm.UseSchema);
+            true, sb, "TABLE_SCHEMA", database, true);
     patternCond(firstCondition, sb, "TABLE_NAME", tableNamePattern);
     sb.append(" ORDER BY TABLE_SCHEMA, TABLE_NAME,  PRIVILEGE_TYPE ");
 
@@ -2890,17 +2867,11 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
 
     StringBuilder sb =
         new StringBuilder("SELECT ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "KCU.REFERENCED_TABLE_SCHEMA PKTABLE_CAT, NULL PKTABLE_SCHEM"
-                    : "KCU.TABLE_CATALOG PKTABLE_CAT, KCU.REFERENCED_TABLE_SCHEMA PKTABLE_SCHEM")
+            .append( "KCU.TABLE_CATALOG PKTABLE_CAT, KCU.REFERENCED_TABLE_SCHEMA PKTABLE_SCHEM")
             .append(
                 ", KCU.REFERENCED_TABLE_NAME PKTABLE_NAME,"
                     + " KCU.REFERENCED_COLUMN_NAME PKCOLUMN_NAME, ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "KCU.TABLE_SCHEMA FKTABLE_CAT, NULL FKTABLE_SCHEM"
-                    : "KCU.TABLE_CATALOG FKTABLE_CAT, KCU.TABLE_SCHEMA FKTABLE_SCHEM")
+            .append("KCU.TABLE_CATALOG FKTABLE_CAT, KCU.TABLE_SCHEMA FKTABLE_SCHEM")
             .append(
                 ", KCU.TABLE_NAME FKTABLE_NAME, KCU.COLUMN_NAME FKCOLUMN_NAME,"
                     + " KCU.POSITION_IN_UNIQUE_CONSTRAINT KEY_SEQ, CASE update_rule    WHEN"
@@ -2916,10 +2887,8 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                     + " ON KCU.CONSTRAINT_CATALOG = RC.CONSTRAINT_CATALOG"
                     + " AND KCU.CONSTRAINT_SCHEMA = RC.CONSTRAINT_SCHEMA"
                     + " AND KCU.CONSTRAINT_NAME = RC.CONSTRAINT_NAME ");
-    String parentDatabase =
-        conf.useCatalogTerm() == CatalogTerm.UseCatalog ? parentCatalog : parentSchema;
-    String foreignDatabase =
-        conf.useCatalogTerm() == CatalogTerm.UseCatalog ? foreignCatalog : foreignSchema;
+    String parentDatabase = parentCatalog + "." + parentSchema;
+    String foreignDatabase = foreignCatalog + "." + foreignSchema;
     boolean firstCondition =
         databaseCond(true, sb, "KCU.REFERENCED_TABLE_SCHEMA", parentDatabase, false);
     firstCondition = databaseCond(firstCondition, sb, "KCU.TABLE_SCHEMA", foreignDatabase, false);
@@ -3713,15 +3682,9 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
     }
     StringBuilder sb =
         new StringBuilder("SELECT ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "TABLE_SCHEMA TABLE_CAT, NULL TABLE_SCHEM"
-                    : "TABLE_CATALOG TABLE_CAT, TABLE_SCHEMA TABLE_SCHEM")
+            .append("TABLE_CATALOG TABLE_CAT, TABLE_SCHEMA TABLE_SCHEM")
             .append(", TABLE_NAME, " + "NON_UNIQUE, ")
-            .append(
-                conf.useCatalogTerm() == CatalogTerm.UseCatalog
-                    ? "TABLE_SCHEMA INDEX_QUALIFIER"
-                    : "TABLE_CATALOG INDEX_QUALIFIER")
+            .append("TABLE_CATALOG INDEX_QUALIFIER")
             .append(
                 ", INDEX_NAME, "
                     + tableIndexOther
@@ -3733,7 +3696,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                     + "NULL PAGES, "
                     + "NULL FILTER_CONDITION"
                     + " FROM INFORMATION_SCHEMA.STATISTICS");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schema;
+    String database = catalog + "." + schema;
     boolean firstCondition = databaseCond(true, sb, "TABLE_SCHEMA", database, false);
     sb.append(firstCondition ? " WHERE " : " AND ")
         .append("TABLE_NAME = ")
@@ -4221,10 +4184,10 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
                 + " FUNCTION_TYPE, "
                 + "SPECIFIC_NAME "
                 + " FROM INFORMATION_SCHEMA.ROUTINES");
-    String database = conf.useCatalogTerm() == CatalogTerm.UseCatalog ? catalog : schemaPattern;
+    String database = catalog + "." + schemaPattern;
     boolean firstCondition =
         databaseCond(
-            true, sb, "ROUTINE_SCHEMA", database, conf.useCatalogTerm() == CatalogTerm.UseSchema);
+            true, sb, "ROUTINE_SCHEMA", database, true);
     firstCondition = patternCond(firstCondition, sb, "ROUTINE_NAME", functionNamePattern);
     sb.append(firstCondition ? " WHERE " : " AND ").append(" ROUTINE_TYPE='FUNCTION'");
     sb.append(" ORDER BY FUNCTION_CAT,FUNCTION_SCHEM,FUNCTION_NAME,SPECIFIC_NAME");
@@ -4250,6 +4213,7 @@ public class DatabaseMetaData implements java.sql.DatabaseMetaData {
   }
 
   private static class Identifier {
+    public String catalog;
     public String schema;
     public String name;
   }

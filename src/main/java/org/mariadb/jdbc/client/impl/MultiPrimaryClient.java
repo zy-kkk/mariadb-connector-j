@@ -19,6 +19,7 @@ import org.mariadb.jdbc.client.util.ClosableLock;
 import org.mariadb.jdbc.export.ExceptionFactory;
 import org.mariadb.jdbc.export.Prepare;
 import org.mariadb.jdbc.message.ClientMessage;
+import org.mariadb.jdbc.message.client.ChangeCatalogPacket;
 import org.mariadb.jdbc.message.client.ChangeDbPacket;
 import org.mariadb.jdbc.message.client.QueryPacket;
 import org.mariadb.jdbc.message.client.RedoableWithPrepareClientMessage;
@@ -255,6 +256,15 @@ public class MultiPrimaryClient implements Client {
                     + (((oldCtx.getServerStatus() & ServerStatus.AUTOCOMMIT) > 0) ? "1" : "0")),
             true);
       }
+    }
+
+    if ((oldCtx.getStateFlag() & ConnectionState.STATE_CATALOG) > 0
+        && !Objects.equals(currentClient.getContext().getCatalog(), oldCtx.getCatalog())) {
+      currentClient.getContext().addStateFlag(ConnectionState.STATE_CATALOG);
+      if (oldCtx.getCatalog() != null) {
+        currentClient.execute(new ChangeCatalogPacket(oldCtx.getCatalog()), true);
+      }
+      currentClient.getContext().setCatalog(oldCtx.getCatalog());
     }
 
     if ((oldCtx.getStateFlag() & ConnectionState.STATE_DATABASE) > 0

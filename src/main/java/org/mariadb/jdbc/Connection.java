@@ -15,13 +15,13 @@ import org.mariadb.jdbc.client.Context;
 import org.mariadb.jdbc.client.impl.StandardClient;
 import org.mariadb.jdbc.client.util.ClosableLock;
 import org.mariadb.jdbc.export.ExceptionFactory;
+import org.mariadb.jdbc.message.client.ChangeCatalogPacket;
 import org.mariadb.jdbc.message.client.ChangeDbPacket;
 import org.mariadb.jdbc.message.client.PingPacket;
 import org.mariadb.jdbc.message.client.QueryPacket;
 import org.mariadb.jdbc.message.client.ResetPacket;
 import org.mariadb.jdbc.util.NativeSql;
 import org.mariadb.jdbc.util.constants.Capabilities;
-import org.mariadb.jdbc.util.constants.CatalogTerm;
 import org.mariadb.jdbc.util.constants.ConnectionState;
 import org.mariadb.jdbc.util.constants.ServerStatus;
 import org.mariadb.jdbc.util.timeout.NoOpQueryTimeoutHandler;
@@ -308,24 +308,41 @@ public class Connection implements java.sql.Connection {
 
   @Override
   public String getCatalog() throws SQLException {
-    if (conf.useCatalogTerm() == CatalogTerm.UseCatalog) return getDatabase();
-    return "def";
+    if (client.getContext().hasClientCapability(Capabilities.CLIENT_SESSION_TRACK)) {
+      return client.getContext().getCatalog();
+    }
+    try (Statement stmt = createStatement()) {
+      ResultSet rs = stmt.executeQuery("select current_catalog()");
+      rs.next();
+      client.getContext().setCatalog(rs.getString(1));
+      return client.getContext().getCatalog();
+    }
   }
 
   @Override
   public void setCatalog(String catalog) throws SQLException {
-    if (conf.useCatalogTerm() == CatalogTerm.UseCatalog) setDatabase(catalog);
+    if (catalog == null) {
+      return;
+    }
+    if (client.getContext().hasClientCapability(Capabilities.CLIENT_SESSION_TRACK)
+        && catalog.equals(client.getContext().getCatalog())) {
+      return;
+    }
+    try (ClosableLock ignore = lock.closeableLock()) {
+      getContext().addStateFlag(ConnectionState.STATE_CATALOG);
+      client.execute(new ChangeCatalogPacket(catalog), true);
+      client.getContext().setCatalog(catalog);
+    }
   }
 
   @Override
   public String getSchema() throws SQLException {
-    if (conf.useCatalogTerm() == CatalogTerm.UseSchema) return getDatabase();
-    return null;
+    return getDatabase();
   }
 
   @Override
   public void setSchema(String schema) throws SQLException {
-    if (conf.useCatalogTerm() == CatalogTerm.UseSchema) setDatabase(schema);
+    setDatabase(schema);
   }
 
   private String getDatabase() throws SQLException {
@@ -845,6 +862,9 @@ public class Connection implements java.sql.Connection {
         }
         if ((stateFlag & ConnectionState.STATE_AUTOCOMMIT) != 0) {
           setAutoCommit(conf.autocommit() == null || conf.autocommit());
+        }
+        if((stateFlag & ConnectionState.STATE_CATALOG) != 0) {
+          setCatalog(conf.catalog());
         }
         if ((stateFlag & ConnectionState.STATE_DATABASE) != 0) {
           setCatalog(conf.database());

@@ -100,6 +100,20 @@ public interface Context {
   void setServerStatus(int serverStatus);
 
   /**
+   * Get current connection catalog
+   *
+   * @return catalog
+   */
+  String getCatalog();
+
+  /**
+   * set current catalog context
+   *
+   * @param catalog catalog
+   */
+  void setCatalog(String catalog);
+
+  /**
    * Get current connection database
    *
    * @return database
